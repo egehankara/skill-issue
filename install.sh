@@ -7,11 +7,16 @@ set -e
 dir="$(cd "$(dirname "$0")" && pwd)"
 shells="$*"
 [ -n "$shells" ] || shells="$(basename "${SHELL:-}")"
+if [ -z "$shells" ]; then
+    echo "Couldn't tell which shell you use. Name it: ./install.sh fish   (or bash, zsh)"
+    exit 1
+fi
 
 command -v notify-send >/dev/null || {
     echo "notify-send not found. Install it first:"
     echo "  Arch / Fedora:   libnotify"
     echo "  Debian / Ubuntu: libnotify-bin"
+    echo "  openSUSE:        libnotify-tools"
     exit 1
 }
 
@@ -23,7 +28,11 @@ add_source() {
     if grep -qF "# skill-issue" "$rc"; then
         echo "$2: already in $rc"
     else
-        printf '\n%s\n' "$line" >>"$rc"
+        # Start on a new line if the file doesn't end with one
+        if [ -s "$rc" ] && [ -n "$(tail -c 1 "$rc")" ]; then
+            echo >>"$rc"
+        fi
+        printf '%s\n' "$line" >>"$rc"
         echo "$2: added to the end of $rc"
     fi
 }
@@ -53,7 +62,7 @@ for shell in $shells; do
 done
 
 # Send a test notification to make sure they can actually show up
-if notify-send -a Terminal -i dialog-error "SKILL ISSUE" "skill-issue is installed" 2>/dev/null; then
+if notify-send -a skill-issue -i dialog-error "SKILL ISSUE" "skill-issue is installed" 2>/dev/null; then
     echo
     echo "You should see a test notification now."
     echo "Open a new terminal and run a failing command, like: ls does-not-exist"

@@ -16,8 +16,19 @@
 
 : "${SKILL_ISSUE_IGNORE=grep egrep fgrep zgrep rg ag ack diff cmp test [ [[ false pgrep pidof which type command read exit hash}"
 
+# Globals the functions below fill in. Declared here so zsh's warn_create_global stays quiet.
+# Files are written with ">|" so noclobber (set -C) doesn't block them.
 __skill_issue_last_cmd=
 __skill_issue_last_time=0
+__skill_issue_cmdname=
+__skill_issue_conf=
+__skill_issue_iconf=
+__skill_issue_msgconf=
+__skill_issue_message=
+__skill_issue_today_n=0
+__skill_issue_countf=
+__skill_issue_icon_args=()
+__skill_issue_body_args=()
 
 # Sets __skill_issue_cmdname to the command name, skipping wrappers like sudo, env, time and VAR=value
 __skill_issue_name() {
@@ -128,81 +139,65 @@ __skill_issue_messages_file() {
     __skill_issue_msgconf="${XDG_CONFIG_HOME:-$HOME/.config}/skill-issue/messages"
 }
 
-# Sets __skill_issue_msgs to the usable lines of a messages file: no empty lines, no # comments
-__skill_issue_read_messages() {
-    local line
-    __skill_issue_msgs=()
-    [ -f "$1" ] && [ -r "$1" ] || return 1
-    while IFS= read -r line || [ -n "$line" ]; do
-        line=${line%$'\r'}
-        line=${line#"${line%%[![:space:]]*}"}
-        line=${line%"${line##*[![:space:]]}"}
-        case $line in '' | '#'*) continue ;; esac
-        __skill_issue_msgs+=("$line")
-    done <"$1"
-    [ "${#__skill_issue_msgs[@]}" -gt 0 ]
-}
+# Picks messages. Written in sh so the bash/zsh version can share it word for word.
+#   count FILE        prints how many messages FILE has
+#   next FILE BAG     prints the next message. Shuffle-bag random: every message is shown
+#                     once before any repeats, never the same one twice in a row.
+# BAG holds a stamp of FILE, the last message shown, then what's left of the round.
+# If FILE changes, the stamp doesn't match and a new round starts.
+__skill_issue_picker='
+[ -f "$2" ] && [ -r "$2" ] || exit 1
+# One message per line: trim spaces, skip empty lines and # comments.
+# Bytes that are not valid UTF-8 are dropped: notifications refuse them.
+utf8() { if command -v iconv >/dev/null 2>&1; then iconv -f UTF-8 -t UTF-8 -c; else cat; fi; }
+list=$(tr -d "\r" <"$2" | utf8 | sed "s/^[[:space:]]*//; s/[[:space:]]*\$//" | grep -a -v -e "^\$" -e "^#")
+n=0
+[ -n "$list" ] && n=$(printf "%s\n" "$list" | wc -l)
+if [ "$1" = count ]; then
+    echo "$n"
+    exit 0
+fi
+[ "$n" -gt 0 ] || exit 1
+bag=$3
+stamp="$n:$(stat -c %Y:%s -- "$2" 2>/dev/null):$2"
+last=0
+rest=
+if [ -r "$bag" ] && [ "$(head -n 1 "$bag")" = "$stamp" ]; then
+    last=$(sed -n 2p "$bag")
+    rest=$(tail -n +3 "$bag")
+fi
+if [ -z "$rest" ]; then
+    # New round: every message once, in random order
+    rest=$(seq "$n" | shuf)
+    # Do not start it with the message that ended the last round
+    if [ "$n" -gt 1 ] && [ "$(printf "%s\n" "$rest" | head -n 1)" = "$last" ]; then
+        rest=$(printf "%s\n" "$rest" | tail -n +2; echo "$last")
+    fi
+fi
+idx=$(printf "%s\n" "$rest" | head -n 1)
+rest=$(printf "%s\n" "$rest" | tail -n +2)
+case $idx in "" | *[!0-9]*) idx=0 ;; esac
+if [ "$idx" -lt 1 ] || [ "$idx" -gt "$n" ]; then
+    idx=$(shuf -i "1-$n" -n 1)
+    rest=
+fi
+mkdir -p "${bag%/*}"
+{
+    printf "%s\n%s\n" "$stamp" "$idx"
+    if [ -n "$rest" ]; then printf "%s\n" "$rest"; fi
+} >"$bag.$$" && mv -f "$bag.$$" "$bag"
+printf "%s\n" "$list" | sed -n "${idx}p"'
 
-# Sets __skill_issue_message to the next message. Shuffle-bag random: every message
-# is shown once before any repeats, and never the same one twice in a row.
-# No subshell here: zsh wouldn't move $RANDOM forward in one.
+# Sets __skill_issue_message to the next message, if there's a messages file
 __skill_issue_next_message() {
-    # Count arrays from 0 in zsh too, like bash
-    [ -n "${ZSH_VERSION:-}" ] && setopt localoptions ksharrays
-    local file= n stamp bagf last=0 i j t idx line
-    local -a bag lines
+    local file=
     __skill_issue_message=
     __skill_issue_messages_file
     [ -r "$__skill_issue_msgconf" ] || return 1
     IFS= read -r file <"$__skill_issue_msgconf" || [ -n "$file" ] || return 1
-    __skill_issue_read_messages "$file" || return 1
-    n=${#__skill_issue_msgs[@]}
-
-    # The bag file: a stamp of the messages file, the last message shown, then what's left.
-    # If the messages file changed, the stamp doesn't match and a new round starts.
-    bagf="${XDG_STATE_HOME:-$HOME/.local/state}/skill-issue/bag"
-    stamp="$n:$(stat -c %Y:%s -- "$file" 2>/dev/null):$file"
-    if [ -r "$bagf" ]; then
-        while IFS= read -r line; do
-            lines+=("$line")
-        done <"$bagf"
-        if [ "${lines[0]:-}" = "$stamp" ]; then
-            last=${lines[1]:-0}
-            bag=("${lines[@]:2}")
-        fi
-    fi
-
-    if [ "${#bag[@]}" = 0 ]; then
-        # New round: shuffle all messages (Fisher-Yates)
-        i=1
-        while [ "$i" -le "$n" ]; do
-            bag+=("$i")
-            i=$((i + 1))
-        done
-        i=$((n - 1))
-        while [ "$i" -gt 0 ]; do
-            j=$((RANDOM % (i + 1)))
-            t=${bag[i]}
-            bag[i]=${bag[j]}
-            bag[j]=$t
-            i=$((i - 1))
-        done
-        # Don't start the new round with the message that ended the last one
-        if [ "$n" -gt 1 ] && [ "${bag[0]}" = "$last" ]; then
-            bag=("${bag[@]:1}" "${bag[0]}")
-        fi
-    fi
-
-    idx=${bag[0]}
-    bag=("${bag[@]:1}")
-    case $idx in '' | *[!0-9]*) idx=0 ;; esac
-    if [ "$idx" -lt 1 ] || [ "$idx" -gt "$n" ]; then
-        idx=$((RANDOM % n + 1))
-        bag=()
-    fi
-    mkdir -p "${bagf%/*}"
-    printf '%s\n' "$stamp" "$idx" "${bag[@]}" >"$bagf"
-    __skill_issue_message=${__skill_issue_msgs[idx - 1]}
+    __skill_issue_message=$(sh -c "$__skill_issue_picker" skill-issue next "$file" \
+        "${XDG_STATE_HOME:-$HOME/.local/state}/skill-issue/bag" 2>/dev/null)
+    [ -n "$__skill_issue_message" ]
 }
 
 # Sets __skill_issue_body_args to the message for notify-send, if there is one.
@@ -223,16 +218,17 @@ __skill_issue_send() {
     __skill_issue_icon_opts
     __skill_issue_body
     if [ -n "${SKILL_ISSUE_DRY:-}" ]; then
-        echo "NOTIFY ${__skill_issue_icon_args[*]}${__skill_issue_body_args[*]:+ | ${__skill_issue_body_args[*]}}"
+        printf '%s\n' "NOTIFY ${__skill_issue_icon_args[*]}${__skill_issue_body_args[*]:+ | ${__skill_issue_body_args[*]}}"
         return 0
     fi
-    notify-send -a Terminal "${__skill_issue_icon_args[@]}" "SKILL ISSUE" "${__skill_issue_body_args[@]}" 2>/dev/null
+    notify-send -a skill-issue "${__skill_issue_icon_args[@]}" "SKILL ISSUE" "${__skill_issue_body_args[@]}" 2>/dev/null
 }
 
 __skill_issue_notify() {
     if [ -n "${SKILL_ISSUE_DRY:-}" ]; then
         __skill_issue_body
-        echo "SKILL ISSUE${__skill_issue_body_args[*]:+ | ${__skill_issue_body_args[*]}}"
+        printf '%s\n' "SKILL ISSUE${__skill_issue_body_args[*]:+ | ${__skill_issue_body_args[*]}}"
+        __skill_issue_count_up
         __skill_issue_play
         return 0
     fi
@@ -243,14 +239,62 @@ __skill_issue_notify() {
     __skill_issue_play
     # Missing notify-send or notification daemon: stay quiet instead of printing errors
     command -v notify-send >/dev/null 2>&1 || return 0
+    __skill_issue_count_up
     __skill_issue_icon_opts
     __skill_issue_body
-    (notify-send -a Terminal "${__skill_issue_icon_args[@]}" "SKILL ISSUE" "${__skill_issue_body_args[@]}" >/dev/null 2>&1 &)
+    (notify-send -a skill-issue "${__skill_issue_icon_args[@]}" "SKILL ISSUE" "${__skill_issue_body_args[@]}" >/dev/null 2>&1 &)
+}
+
+# Today's count lives in count-YYYY-MM-DD: one byte per SKILL ISSUE, so the count is the
+# file size. Appending a byte is atomic, so terminals failing at the same moment never lose
+# one. Shared with the fish version.
+__skill_issue_count_file() {
+    __skill_issue_countf="${XDG_STATE_HOME:-$HOME/.local/state}/skill-issue/count-$(date +%F)"
+}
+
+# Sets __skill_issue_today_n to how many SKILL ISSUEs there were today
+__skill_issue_today() {
+    local n
+    __skill_issue_count_file
+    __skill_issue_today_n=0
+    if [ -f "$__skill_issue_countf" ]; then
+        n=$(wc -c <"$__skill_issue_countf")
+        __skill_issue_today_n=$((n + 0))
+    fi
+}
+
+# One more for today. The first one of a new day clears the old days.
+__skill_issue_count_up() {
+    __skill_issue_count_file
+    if [ ! -f "$__skill_issue_countf" ]; then
+        mkdir -p "${__skill_issue_countf%/*}"
+        # find, not a glob: no error with nomatch / failglob when there's nothing to clear
+        find "${__skill_issue_countf%/*}" -maxdepth 1 -name 'count-*' -delete
+    fi
+    # In sh: zsh's noclobber won't let >> create a file, and bash has no >>| to override it
+    sh -c 'printf x >>"$1"' skill-issue "$__skill_issue_countf"
+}
+
+# "No SKILL ISSUE today", "1 SKILL ISSUE today", "7 SKILL ISSUEs today"
+__skill_issue_today_text() {
+    __skill_issue_today
+    case $__skill_issue_today_n in
+        0) echo "No SKILL ISSUE today. Suspicious." ;;
+        1) echo "1 SKILL ISSUE today." ;;
+        *) echo "$__skill_issue_today_n SKILL ISSUEs today." ;;
+    esac
 }
 
 # Usage: __skill_issue_handle CMDLINE "PIPESTATUS CODES" STATUS
 __skill_issue_handle() {
     local cmd=$1 codes=$2 st=$3 failed=0 re c part prest crest rest n_parts=1 n_codes=0
+    local MATCH MBEGIN MEND
+    local -a match mbegin mend
+
+    # Fast path: everything worked and there's no earlier failure to compare with
+    if [ -z "$__skill_issue_last_cmd" ]; then
+        case "$codes $st" in *[!0\ ]*) ;; *) return 0 ;; esac
+    fi
 
     # Flatten and trim the command line
     cmd=${cmd//$'\n'/ }
@@ -323,6 +367,22 @@ __skill_issue_handle() {
     return 0
 }
 
+# Is $1 a readable file? Prints why not. $2 is the name the user typed.
+__skill_issue_check_file() {
+    if [ -d "$1" ]; then
+        echo "skill-issue: $2 is a folder, not a file" >&2
+        return 1
+    fi
+    if [ ! -f "$1" ]; then
+        echo "skill-issue: no such file: $2" >&2
+        return 1
+    fi
+    if [ ! -r "$1" ]; then
+        echo "skill-issue: can't read $2" >&2
+        return 1
+    fi
+}
+
 __skill_issue_sound_status() {
     local line=
     __skill_issue_sound_file
@@ -333,6 +393,8 @@ __skill_issue_sound_status() {
         echo "Sound: none. Pick one with: skill-issue sound /path/to/file.mp3  or  skill-issue sound system"
     elif [ "$line" = system ]; then
         echo "Sound: the system error sound"
+    elif [ ! -f "$line" ]; then
+        echo "Sound: $line (the file is missing, so no sound)"
     else
         echo "Sound: $line"
     fi
@@ -358,14 +420,7 @@ __skill_issue_sound() {
             # Store an absolute path, so it works from any folder
             file=$choice
             case $file in "~"*) file=$HOME${file#"~"} ;; esac
-            if [ ! -f "$file" ]; then
-                echo "skill-issue: no such file: $choice" >&2
-                return 1
-            fi
-            if [ ! -r "$file" ]; then
-                echo "skill-issue: can't read $choice" >&2
-                return 1
-            fi
+            __skill_issue_check_file "$file" "$choice" || return 1
             sound=$(realpath -- "$file")
             ;;
     esac
@@ -382,7 +437,7 @@ __skill_issue_sound() {
         return 1
     fi
     mkdir -p "${__skill_issue_conf%/*}"
-    printf '%s\n' "$sound" >"$__skill_issue_conf"
+    printf '%s\n' "$sound" >|"$__skill_issue_conf"
     __skill_issue_sound_status
 }
 
@@ -396,27 +451,26 @@ __skill_issue_icon_status() {
         echo "Icon: the default error icon"
     elif [ "$line" = none ]; then
         echo "Icon: none"
+    elif [ "${line#/}" != "$line" ] && [ ! -f "$line" ]; then
+        echo "Icon: $line (the file is missing, so no picture)"
     else
         echo "Icon: $line"
     fi
 }
 
 # Is there an icon with this name in the installed icon themes?
+# Runs in sh, so glob options like failglob or nullglob in your shell don't get in the way.
 __skill_issue_icon_exists() {
-    local name=$1 d f rest="${XDG_DATA_HOME:-$HOME/.local/share}:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
-    [ -n "${ZSH_VERSION:-}" ] && setopt localoptions nonomatch
-    while [ -n "$rest" ]; do
-        d=${rest%%:*}
-        case $rest in
-            *:*) rest=${rest#*:} ;;
-            *) rest= ;;
-        esac
-        [ -n "$d" ] || continue
-        for f in "$HOME"/.icons/*/*/*/"$name".* "$d"/icons/*/*/*/"$name".* "$d"/icons/*/*/"$name".* "$d"/pixmaps/"$name".*; do
-            [ -e "$f" ] && return 0
+    sh -c '
+        name=$1
+        IFS=:
+        for d in "$2" $3; do
+            [ -n "$d" ] || continue
+            for f in "$HOME"/.icons/*/*/*/"$name".* "$d"/icons/*/*/*/"$name".* "$d"/icons/*/*/"$name".* "$d"/pixmaps/"$name".*; do
+                [ -e "$f" ] && exit 0
+            done
         done
-    done
-    return 1
+        exit 1' skill-issue "$1" "${XDG_DATA_HOME:-$HOME/.local/share}" "${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
 }
 
 __skill_issue_icon() {
@@ -439,16 +493,9 @@ __skill_issue_icon() {
             case $choice in */*) ;; *) [ -e "$file" ] || file= ;; esac
             if [ -n "$file" ]; then
                 # A picture file
-                if [ ! -f "$file" ]; then
-                    echo "skill-issue: no such file: $choice" >&2
-                    return 1
-                fi
-                if [ ! -r "$file" ]; then
-                    echo "skill-issue: can't read $choice" >&2
-                    return 1
-                fi
+                __skill_issue_check_file "$file" "$choice" || return 1
                 if command -v file >/dev/null 2>&1; then
-                    mime=$(command file -b --mime-type -- "$file")
+                    mime=$(command file -L -b --mime-type -- "$file")
                 else
                     case $file in
                         *.[pP][nN][gG] | *.[jJ][pP][gG] | *.[jJ][pP][eE][gG] | *.[sS][vV][gG] | *.[sS][vV][gG][zZ] | \
@@ -482,7 +529,7 @@ __skill_issue_icon() {
     esac
     if [ -n "$icon" ]; then
         mkdir -p "${__skill_issue_iconf%/*}"
-        printf '%s\n' "$icon" >"$__skill_issue_iconf"
+        printf '%s\n' "$icon" >|"$__skill_issue_iconf"
     fi
     __skill_issue_icon_status
     # Show it once
@@ -502,11 +549,14 @@ __skill_issue_messages_status() {
     elif [ ! -f "$file" ]; then
         echo "Messages: $file (the file is missing, so no messages)"
     else
-        __skill_issue_read_messages "$file" || :
-        if [ "${#__skill_issue_msgs[@]}" = 1 ]; then
+        local n
+        n=$(sh -c "$__skill_issue_picker" skill-issue count "$file" 2>/dev/null)
+        if [ "$n" = 0 ]; then
+            echo "Messages: $file (no messages in it, so just SKILL ISSUE)"
+        elif [ "$n" = 1 ]; then
             echo "Messages: $file (1 message)"
         else
-            echo "Messages: $file (${#__skill_issue_msgs[@]} messages)"
+            echo "Messages: $file ($n messages)"
         fi
     fi
 }
@@ -527,16 +577,13 @@ __skill_issue_messages() {
     esac
     file=$choice
     case $file in "~"*) file=$HOME${file#"~"} ;; esac
-    if [ ! -f "$file" ]; then
-        echo "skill-issue: no such file: $choice" >&2
-        return 1
-    fi
-    if [ ! -r "$file" ]; then
-        echo "skill-issue: can't read $choice" >&2
+    __skill_issue_check_file "$file" "$choice" || return 1
+    if [ ! -s "$file" ]; then
+        echo "skill-issue: $choice is empty. Write one message per line." >&2
         return 1
     fi
     if command -v file >/dev/null 2>&1; then
-        mime=$(command file -b --mime-type -- "$file")
+        mime=$(command file -L -b --mime-type -- "$file")
         case $mime in
             text/*) ;;
             *)
@@ -544,14 +591,22 @@ __skill_issue_messages() {
                 return 1
                 ;;
         esac
+        case $(command file -L -b --mime-encoding -- "$file") in
+            us-ascii | utf-8) ;;
+            *)
+                echo "skill-issue: $choice isn't saved as UTF-8, so letters like ç or ğ would come out broken." >&2
+                echo "Save it as UTF-8 (most editors have this in \"Save as\") and try again." >&2
+                return 1
+                ;;
+        esac
     fi
-    if ! __skill_issue_read_messages "$file"; then
+    if [ "$(sh -c "$__skill_issue_picker" skill-issue count "$file" 2>/dev/null)" = 0 ]; then
         echo "skill-issue: no messages in $choice. Write one message per line." >&2
         echo "Empty lines and lines starting with # are skipped." >&2
         return 1
     fi
     mkdir -p "${__skill_issue_msgconf%/*}"
-    realpath -- "$file" >"$__skill_issue_msgconf"
+    realpath -- "$file" >|"$__skill_issue_msgconf"
     rm -f "${XDG_STATE_HOME:-$HOME/.local/state}/skill-issue/bag"
     __skill_issue_messages_status
     if __skill_issue_send; then
@@ -572,6 +627,7 @@ __skill_issue_help() {
     echo "  skill-issue on              turn notifications on"
     echo "  skill-issue off             turn them off, in every shell, until you turn them back on"
     echo "  skill-issue status          show the current settings"
+    echo "  skill-issue today           how many SKILL ISSUEs you got today"
     echo "  skill-issue test            send a test notification"
     echo "  skill-issue help            show this help"
     echo
@@ -600,6 +656,7 @@ __skill_issue_status() {
     else
         echo "skill-issue is on. Turn it off with: skill-issue off"
     fi
+    echo "Today: $(__skill_issue_today_text)"
     __skill_issue_sound_status
     __skill_issue_icon_status
     __skill_issue_messages_status
@@ -609,7 +666,7 @@ skill-issue() {
     local off="${XDG_STATE_HOME:-$HOME/.local/state}/skill-issue/off"
     case ${1:-} in
         off)
-            mkdir -p "${off%/*}" && : >"$off"
+            mkdir -p "${off%/*}" && : >|"$off"
             echo "skill-issue is off. No more truth, in any shell."
             ;;
         on)
@@ -630,6 +687,12 @@ skill-issue() {
             ;;
         status)
             __skill_issue_status
+            ;;
+        today)
+            __skill_issue_today_text
+            if [ -e "$off" ]; then
+                echo "skill-issue is off right now, so nothing is being counted."
+            fi
             ;;
         sound)
             __skill_issue_sound "${2:-}"
@@ -679,11 +742,18 @@ if [ -n "${BASH_VERSION:-}" ]; then
         # Only after a command actually ran (not an empty Enter)
         if [ "$__skill_issue_ran" = 1 ]; then
             __skill_issue_ran=0
+            # Everything worked and there's nothing to compare with: skip reading history
+            if [ -z "$__skill_issue_last_cmd" ]; then
+                case "$codes $st" in *[!0\ ]*) ;; *) return $st ;; esac
+            fi
             cmd=$(HISTTIMEFORMAT= builtin history 1)
             # Drop the history number in front: "  123  cmd" or "  123* cmd"
             cmd=${cmd#"${cmd%%[![:space:]]*}"}
             cmd=${cmd#"${cmd%%[![:digit:]]*}"}
             cmd=${cmd#\*}
+            # History turned off (set +o history): we can't see the command, so judge by the
+            # exit status alone rather than staying silent
+            [ -n "$cmd" ] || cmd="?"
             __skill_issue_handle "$cmd" "$codes" "$st"
         fi
         # Hand the original status on to the next prompt hooks
@@ -695,10 +765,10 @@ if [ -n "${BASH_VERSION:-}" ]; then
         *) PROMPT_COMMAND="__skill_issue_precmd${PROMPT_COMMAND:+;$PROMPT_COMMAND}" ;;
     esac
     # PS0 is expanded right before a command runs, never on an empty Enter.
-    # The array subscript sets the flag without printing anything.
+    # The array subscript sets the flag without printing anything ("-": safe with set -u).
     case ${PS0:-} in
         *__skill_issue_ran=1*) ;;
-        *) PS0="${PS0:-}"'${__skill_issue_z[__skill_issue_ran=1]}' ;;
+        *) PS0="${PS0:-}"'${__skill_issue_z[__skill_issue_ran=1]-}' ;;
     esac
 
 elif [ -n "${ZSH_VERSION:-}" ]; then
@@ -720,7 +790,10 @@ elif [ -n "${ZSH_VERSION:-}" ]; then
         return $st
     }
 
-    # Run first, so other prompt hooks can't change the status before we read it
-    precmd_functions=(__skill_issue_precmd ${precmd_functions:#__skill_issue_precmd})
-    preexec_functions=(${preexec_functions:#__skill_issue_preexec} __skill_issue_preexec)
+    # Run first, so other prompt hooks can't change the status before we read it.
+    # typeset first: with nounset, using a hook array nobody created yet is an error.
+    # [@]: with ksharrays, a bare $array would only be its first element.
+    typeset -ga precmd_functions preexec_functions
+    precmd_functions=(__skill_issue_precmd "${(@)precmd_functions[@]:#__skill_issue_precmd}")
+    preexec_functions=("${(@)preexec_functions[@]:#__skill_issue_preexec}" __skill_issue_preexec)
 fi

@@ -57,7 +57,7 @@ expect() {
 
 conf=$XDG_CONFIG_HOME/skill-issue/sound
 snd="$XDG_CONFIG_HOME/my sound.wav"
-: >"$snd"
+: >|"$snd"
 expect "no sound by default"        "Sound: none"           skill-issue sound
 expect "failure plays nothing"      "SKILL ISSUE"           __skill_issue_handle ls 2 2
 expect "missing file is refused"    "no such file"          skill-issue sound /nope.mp3
@@ -78,10 +78,10 @@ expect "off again: none"            "Sound: none"           skill-issue sound
 # Icons. A tiny fake icon theme, so the tests don't depend on this computer
 XDG_DATA_DIRS=$XDG_CONFIG_HOME/data
 mkdir -p "$XDG_DATA_DIRS/icons/hicolor/48x48/apps"
-: >"$XDG_DATA_DIRS/icons/hicolor/48x48/apps/skill-test-icon.png"
+: >|"$XDG_DATA_DIRS/icons/hicolor/48x48/apps/skill-test-icon.png"
 pic="$XDG_CONFIG_HOME/my clown.png"
-printf '\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89' >"$pic"
-echo "not a picture" >"$XDG_CONFIG_HOME/fake.png"
+printf '\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89' >|"$pic"
+echo "not a picture" >|"$XDG_CONFIG_HOME/fake.png"
 expect "default icon"               "Icon: the default error icon" skill-issue icon
 expect "default icon is sent"       "NOTIFY -i dialog-error"  __skill_issue_send
 expect "missing picture refused"    "no such file"            skill-issue icon /nope.png
@@ -113,8 +113,8 @@ XDG_STATE_HOME=$XDG_CONFIG_HOME/state
 bagf=$XDG_STATE_HOME/skill-issue/bag
 mf="$XDG_CONFIG_HOME/my messages.txt"
 printf '%s\n' "one" "" "# a comment" "  two  " "three"$'\r' "four & <five>" "six" >"$mf"
-printf '\000\001\002binary' >"$XDG_CONFIG_HOME/bin.txt"
-printf '\n# only a comment\n\n' >"$XDG_CONFIG_HOME/empty.txt"
+printf '\000\001\002binary' >|"$XDG_CONFIG_HOME/bin.txt"
+printf '\n# only a comment\n\n' >|"$XDG_CONFIG_HOME/empty.txt"
 five() { local i; for i in 1 2 3 4 5; do __skill_issue_handle ls 2 2; done; }
 twice() { __skill_issue_handle ls 2 2; __skill_issue_handle ls 2 2; }
 expect "no messages by default"     "Messages: none"          skill-issue messages
@@ -123,6 +123,8 @@ expect "missing file refused"       "no such file"            skill-issue messag
 expect "binary file refused"        "isn't a text file"       skill-issue messages "$XDG_CONFIG_HOME/bin.txt"
 expect "file without lines refused" "no messages in"          skill-issue messages "$XDG_CONFIG_HOME/empty.txt"
 expect "file is saved, lines count" "(5 messages)"            skill-issue messages "$mf"
+# Start a fresh round: the preview above already took one message
+rm -f "$bagf"
 expect "markup is escaped"          "four &amp; &lt;five&gt;" five
 
 # The shuffle bag: every round of 5 shows all 5 once, never the same twice in a row.
@@ -171,7 +173,7 @@ else
     fails=$((fails + 1))
 fi
 
-printf 'only one\n' >"$XDG_CONFIG_HOME/one.txt"
+printf 'only one\n' >|"$XDG_CONFIG_HOME/one.txt"
 skill-issue messages "$XDG_CONFIG_HOME/one.txt" >/dev/null
 expect "one message, every time"    "SKILL ISSUE | only one"  twice
 expect "status shows messages"      "(1 message)"             skill-issue status
@@ -183,6 +185,63 @@ rm -rf "$XDG_CONFIG_HOME"
 expect "help has categories"        "Messages  (default: none" skill-issue help
 expect "bare command shows settings" "Now"                     skill-issue
 expect "bare command shows help"    "skill-issue sound FILE"  skill-issue
+
+# Odd message files
+XDG_CONFIG_HOME=$(mktemp -d)
+XDG_STATE_HOME=$XDG_CONFIG_HOME/state
+d=$XDG_CONFIG_HOME
+: >|"$d/empty.txt"
+mkdir "$d/folder.txt"
+printf 'g\374zel\n' >|"$d/latin1.txt"
+printf 'çok kötü 💀\n' >|"$d/tr.txt"
+ln -s "$d/tr.txt" "$d/link.txt"
+expect "empty file refused"         "is empty"                skill-issue messages "$d/empty.txt"
+expect "folder refused"             "is a folder"             skill-issue messages "$d/folder.txt"
+expect "non-UTF-8 file refused"     "isn't saved as UTF-8"    skill-issue messages "$d/latin1.txt"
+expect "symlinked file accepted"    "(1 message)"             skill-issue messages "$d/link.txt"
+expect "Turkish letters and emoji"  "SKILL ISSUE | çok kötü 💀" __skill_issue_handle ls 2 2
+printf 'g\374zel\n' >|"$d/tr.txt"
+out=$(__skill_issue_handle ls 2 2 2>&1)
+if [ "$out" = "SKILL ISSUE | gzel" ]; then
+    echo "ok    broken bytes added later: dropped quietly"
+else
+    echo "FAIL  broken bytes added later (got: $out)"
+    fails=$((fails + 1))
+fi
+: >|"$d/tr.txt"
+expect "emptied later: just title"  "no messages in it"       skill-issue messages
+rm -rf "$XDG_CONFIG_HOME"
+
+# Today's count
+XDG_CONFIG_HOME=$(mktemp -d)
+XDG_STATE_HOME=$XDG_CONFIG_HOME/state
+cdir=$XDG_STATE_HOME/skill-issue
+expect "nothing yet"                "No SKILL ISSUE today"    skill-issue today
+__skill_issue_handle "ls /x" 2 2 >/dev/null
+expect "one"                        "1 SKILL ISSUE today."    skill-issue today
+__skill_issue_handle "ls" 0 0 >/dev/null
+__skill_issue_handle "grep x y" 1 1 >/dev/null
+__skill_issue_handle "sleep 9" 130 130 >/dev/null
+expect "success, grep, ctrl+c don't count" "1 SKILL ISSUE today." skill-issue today
+__skill_issue_handle "gti" 127 127 >/dev/null
+__skill_issue_handle "make" 2 2 >/dev/null
+expect "three"                      "3 SKILL ISSUEs today."   skill-issue today
+expect "status shows today"         "Today: 3 SKILL ISSUEs"   skill-issue status
+# Pretend today's count is from another day
+mv "$cdir/count-$(date +%F)" "$cdir/count-2000-01-01"
+expect "yesterday doesn't count"    "No SKILL ISSUE today"    skill-issue today
+__skill_issue_handle "ls /x" 2 2 >/dev/null
+expect "new day starts from 1"      "1 SKILL ISSUE today."    skill-issue today
+if [ -e "$cdir/count-2000-01-01" ]; then
+    echo "FAIL  old days are cleared"
+    fails=$((fails + 1))
+else
+    echo "ok    old days are cleared"
+fi
+skill-issue off >/dev/null
+expect "off: says nothing counts"   "nothing is being counted" skill-issue today
+skill-issue on >/dev/null
+rm -rf "$XDG_CONFIG_HOME"
 
 echo
 if [ "$fails" = 0 ]; then echo "all passed"; else echo "$fails failed"; exit 1; fi

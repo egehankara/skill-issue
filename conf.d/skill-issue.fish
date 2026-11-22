@@ -118,7 +118,7 @@ function __skill_issue_send
         echo "NOTIFY" (__skill_issue_icon_opts) (test -n "$body"; and echo "| $body")
         return 0
     end
-    notify-send -a Terminal (__skill_issue_icon_opts) "SKILL ISSUE" $body 2>/dev/null
+    notify-send -a skill-issue (__skill_issue_icon_opts) "SKILL ISSUE" $body 2>/dev/null
 end
 
 # The messages setting: path to a text file, one message per line.
@@ -136,63 +136,66 @@ function __skill_issue_bag_file
     echo $dir/skill-issue/bag
 end
 
-# Prints the usable lines of a messages file: no empty lines, no # comments
-function __skill_issue_read_messages -a file
-    test -f "$file" -a -r "$file"; or return 1
-    string replace -r '\r$' '' <$file | string trim | string match -rv '^(#.*)?$'
+# Picks messages. Written in sh so the bash/zsh version can share it word for word.
+#   count FILE        prints how many messages FILE has
+#   next FILE BAG     prints the next message. Shuffle-bag random: every message is shown
+#                     once before any repeats, never the same one twice in a row.
+# BAG holds a stamp of FILE, the last message shown, then what's left of the round.
+# If FILE changes, the stamp doesn't match and a new round starts.
+set -g __skill_issue_picker '
+[ -f "$2" ] && [ -r "$2" ] || exit 1
+# One message per line: trim spaces, skip empty lines and # comments.
+# Bytes that are not valid UTF-8 are dropped: notifications refuse them.
+utf8() { if command -v iconv >/dev/null 2>&1; then iconv -f UTF-8 -t UTF-8 -c; else cat; fi; }
+list=$(tr -d "\r" <"$2" | utf8 | sed "s/^[[:space:]]*//; s/[[:space:]]*\$//" | grep -a -v -e "^\$" -e "^#")
+n=0
+[ -n "$list" ] && n=$(printf "%s\n" "$list" | wc -l)
+if [ "$1" = count ]; then
+    echo "$n"
+    exit 0
+fi
+[ "$n" -gt 0 ] || exit 1
+bag=$3
+stamp="$n:$(stat -c %Y:%s -- "$2" 2>/dev/null):$2"
+last=0
+rest=
+if [ -r "$bag" ] && [ "$(head -n 1 "$bag")" = "$stamp" ]; then
+    last=$(sed -n 2p "$bag")
+    rest=$(tail -n +3 "$bag")
+fi
+if [ -z "$rest" ]; then
+    # New round: every message once, in random order
+    rest=$(seq "$n" | shuf)
+    # Do not start it with the message that ended the last round
+    if [ "$n" -gt 1 ] && [ "$(printf "%s\n" "$rest" | head -n 1)" = "$last" ]; then
+        rest=$(printf "%s\n" "$rest" | tail -n +2; echo "$last")
+    fi
+fi
+idx=$(printf "%s\n" "$rest" | head -n 1)
+rest=$(printf "%s\n" "$rest" | tail -n +2)
+case $idx in "" | *[!0-9]*) idx=0 ;; esac
+if [ "$idx" -lt 1 ] || [ "$idx" -gt "$n" ]; then
+    idx=$(shuf -i "1-$n" -n 1)
+    rest=
+fi
+mkdir -p "${bag%/*}"
+{
+    printf "%s\n%s\n" "$stamp" "$idx"
+    if [ -n "$rest" ]; then printf "%s\n" "$rest"; fi
+} >"$bag.$$" && mv -f "$bag.$$" "$bag"
+printf "%s\n" "$list" | sed -n "${idx}p"'
+
+# Prints how many messages a file has
+function __skill_issue_count_messages -a file
+    sh -c $__skill_issue_picker skill-issue count $file 2>/dev/null
 end
 
-# Prints the next message. Shuffle-bag random: every message is shown once
-# before any repeats, and never the same one twice in a row.
+# Prints the next message, if there's a messages file
 function __skill_issue_next_message
     set -l conf (__skill_issue_messages_file)
     test -r $conf; or return 1
     read -l file <$conf; or return 1
-    set -l msgs (__skill_issue_read_messages $file)
-    set -l n (count $msgs)
-    test $n -gt 0; or return 1
-
-    # The bag file: a stamp of the messages file, the last message shown, then what's left.
-    # If the messages file changed, the stamp doesn't match and a new round starts.
-    set -l bagf (__skill_issue_bag_file)
-    set -l stamp "$n:"(stat -c %Y:%s -- $file 2>/dev/null)":$file"
-    set -l last 0
-    set -l bag
-    if test -r $bagf
-        set -l lines
-        while read -l line
-            set -a lines $line
-        end <$bagf
-        if test "$lines[1]" = "$stamp"
-            set last $lines[2]
-            set bag $lines[3..-1]
-        end
-    end
-
-    if not set -q bag[1]
-        # New round: shuffle all messages (Fisher-Yates)
-        set bag (seq $n)
-        for i in (seq $n -1 2)
-            set -l j (random 1 $i)
-            set -l t $bag[$i]
-            set bag[$i] $bag[$j]
-            set bag[$j] $t
-        end
-        # Don't start the new round with the message that ended the last one
-        if test $n -gt 1; and test "$bag[1]" = "$last"
-            set bag $bag[2..-1] $bag[1]
-        end
-    end
-
-    set -l idx $bag[1]
-    set -e bag[1]
-    if not string match -qr '^[0-9]+$' -- $idx; or test $idx -lt 1 -o $idx -gt $n
-        set idx (random 1 $n)
-        set bag
-    end
-    mkdir -p (string replace -r '/[^/]*$' '' -- $bagf)
-    printf '%s\n' $stamp $idx $bag >$bagf
-    echo $msgs[$idx]
+    sh -c $__skill_issue_picker skill-issue next $file (__skill_issue_bag_file) 2>/dev/null
 end
 
 # Notifications understand a bit of HTML, so "a < b" must be written as "a &lt; b"
@@ -200,6 +203,37 @@ function __skill_issue_escape
     # Without arguments string would read from the terminal, so stop here
     set -q argv[1]; or return 1
     string replace -a -- '&' '&amp;' $argv | string replace -a -- '<' '&lt;' | string replace -a -- '>' '&gt;'
+end
+
+# Today's count lives in count-YYYY-MM-DD: one byte per SKILL ISSUE, so the count is the
+# file size. Appending a byte is atomic, so terminals failing at the same moment never lose
+# one. Shared with the bash/zsh version.
+function __skill_issue_count_file
+    set -l dir $XDG_STATE_HOME
+    test -n "$dir"; or set dir ~/.local/state
+    echo $dir/skill-issue/count-(date +%F)
+end
+
+# Prints how many SKILL ISSUEs there were today
+function __skill_issue_today
+    set -l f (__skill_issue_count_file)
+    if test -f $f
+        string trim -- (wc -c <$f)
+    else
+        echo 0
+    end
+end
+
+# One more for today. The first one of a new day clears the old days.
+function __skill_issue_count_up
+    set -l f (__skill_issue_count_file)
+    set -l dir (string replace -r '/[^/]*$' '' -- $f)
+    if not test -f $f
+        mkdir -p $dir
+        # find, not a glob: no error when there's nothing to clear
+        find $dir -maxdepth 1 -name 'count-*' -delete
+    end
+    printf x >>$f
 end
 
 function __skill_issue_on_postexec --on-event fish_postexec
@@ -235,6 +269,7 @@ function __skill_issue_notify
         else
             echo "SKILL ISSUE"
         end
+        __skill_issue_count_up
         __skill_issue_play
         return
     end
@@ -244,19 +279,23 @@ function __skill_issue_notify
     __skill_issue_play
     # Missing notify-send or notification daemon: stay quiet instead of printing errors
     command -q notify-send; or return
+    __skill_issue_count_up
     set -l body (__skill_issue_escape (__skill_issue_next_message))
-    notify-send -a Terminal (__skill_issue_icon_opts) "SKILL ISSUE" $body 2>/dev/null &
+    notify-send -a skill-issue (__skill_issue_icon_opts) "SKILL ISSUE" $body 2>/dev/null &
     disown
 end
 
 # Usage: __skill_issue_handle CMDLINE PIPESTATUS... STATUS
 function __skill_issue_handle -a cmdline
     set -l codes $argv[2..-1]
+    # Fast path: everything worked and there's no earlier failure to compare with
+    if test -z "$__skill_issue_last_cmd"; and not string match -qv 0 -- $codes
+        return
+    end
     set -l st $codes[-1]
     set -e codes[-1]
     set cmdline (string trim -- $cmdline | string join ' ')
     test -z "$cmdline"; and return
-    set -l now (date +%s)
 
     set -l failed 0
     if string match -qr -- ';|&&|\|\||&$|(^|\s)(and|or|not|if|while|for|begin|switch)\s' $cmdline
@@ -286,17 +325,33 @@ function __skill_issue_handle -a cmdline
 
     if test $failed -eq 1
         set -g __skill_issue_last_cmd $cmdline
-        set -g __skill_issue_last_time $now
+        set -g __skill_issue_last_time (date +%s)
         __skill_issue_notify
         return
     end
 
     # Failed, then re-ran it with sudo and it worked: forgot sudo
     if test $st -eq 0; and test "$cmdline" = "sudo $__skill_issue_last_cmd"
-        and test (math $now - $__skill_issue_last_time) -lt 120
+        and test (math (date +%s) - $__skill_issue_last_time) -lt 120
         __skill_issue_notify
     end
     set -g __skill_issue_last_cmd ""
+end
+
+# Is FILE a readable file? Prints why not. $argv[2] is the name the user typed.
+function __skill_issue_check_file -a file typed
+    if test -d "$file"
+        echo "skill-issue: $typed is a folder, not a file" >&2
+        return 1
+    end
+    if not test -f "$file"
+        echo "skill-issue: no such file: $typed" >&2
+        return 1
+    end
+    if not test -r "$file"
+        echo "skill-issue: can't read $typed" >&2
+        return 1
+    end
 end
 
 function __skill_issue_sound_status
@@ -304,6 +359,8 @@ function __skill_issue_sound_status
     if test -r $conf; and read -l line <$conf; and test -n "$line"
         if test "$line" = system
             echo "Sound: the system error sound"
+        else if not test -f "$line"
+            echo "Sound: $line (the file is missing, so no sound)"
         else
             echo "Sound: $line"
         end
@@ -328,14 +385,7 @@ function __skill_issue_sound -a choice
         case '*'
             # Store an absolute path, so it works from any folder
             set -l file (string replace -r '^~' -- $HOME $choice)
-            if not test -f "$file"
-                echo "skill-issue: no such file: $choice" >&2
-                return 1
-            end
-            if not test -r "$file"
-                echo "skill-issue: can't read $choice" >&2
-                return 1
-            end
+            __skill_issue_check_file $file $choice; or return 1
             set sound (realpath -- $file)
     end
     # Play it once first: only save a sound that actually plays
@@ -360,6 +410,8 @@ function __skill_issue_icon_status
     if test -r $conf; and read -l line <$conf; and test -n "$line"
         if test "$line" = none
             echo "Icon: none"
+        else if string match -q -- '/*' $line; and not test -f "$line"
+            echo "Icon: $line (the file is missing, so no picture)"
         else
             echo "Icon: $line"
         end
@@ -394,17 +446,10 @@ function __skill_issue_icon -a choice
             set -l file (string replace -r '^~' -- $HOME $choice)
             if string match -q -- '*/*' $choice; or test -e "$file"
                 # A picture file
-                if not test -f "$file"
-                    echo "skill-issue: no such file: $choice" >&2
-                    return 1
-                end
-                if not test -r "$file"
-                    echo "skill-issue: can't read $choice" >&2
-                    return 1
-                end
+                __skill_issue_check_file $file $choice; or return 1
                 set -l is_image 0
                 if command -q file
-                    string match -q 'image/*' (file -b --mime-type -- $file); and set is_image 1
+                    string match -q 'image/*' (file -L -b --mime-type -- $file); and set is_image 1
                 else
                     string match -qir -- '\.(png|jpe?g|svgz?|gif|webp|bmp|ico|xpm|tiff?)$' $file; and set is_image 1
                 end
@@ -437,9 +482,11 @@ end
 function __skill_issue_messages_status
     set -l conf (__skill_issue_messages_file)
     if test -r $conf; and read -l file <$conf; and test -n "$file"
-        set -l n (count (__skill_issue_read_messages $file))
+        set -l n (__skill_issue_count_messages $file)
         if not test -f "$file"
             echo "Messages: $file (the file is missing, so no messages)"
+        else if test "$n" = 0
+            echo "Messages: $file (no messages in it, so just SKILL ISSUE)"
         else if test $n -eq 1
             echo "Messages: $file (1 message)"
         else
@@ -462,23 +509,23 @@ function __skill_issue_messages -a choice
             return
     end
     set -l file (string replace -r '^~' -- $HOME $choice)
-    if not test -f "$file"
-        echo "skill-issue: no such file: $choice" >&2
-        return 1
-    end
-    if not test -r "$file"
-        echo "skill-issue: can't read $choice" >&2
+    __skill_issue_check_file $file $choice; or return 1
+    if not test -s "$file"
+        echo "skill-issue: $choice is empty. Write one message per line." >&2
         return 1
     end
     if command -q file
-        set -l mime (file -b --mime-type -- $file)
-        if not string match -q 'text/*' $mime
+        if not string match -q 'text/*' (file -L -b --mime-type -- $file)
             echo "skill-issue: $choice isn't a text file. Write one message per line in a .txt file." >&2
             return 1
         end
+        if not contains -- (file -L -b --mime-encoding -- $file) us-ascii utf-8
+            echo "skill-issue: $choice isn't saved as UTF-8, so letters like ç or ğ would come out broken." >&2
+            echo "Save it as UTF-8 (most editors have this in \"Save as\") and try again." >&2
+            return 1
+        end
     end
-    set -l found (__skill_issue_read_messages $file)
-    if not set -q found[1]
+    if test (__skill_issue_count_messages $file) -eq 0
         echo "skill-issue: no messages in $choice. Write one message per line." >&2
         echo "Empty lines and lines starting with # are skipped." >&2
         return 1
@@ -502,30 +549,44 @@ function __skill_issue_help
     end
     echo "skill-issue: a SKILL ISSUE notification every time a command fails"
     echo
-    echo {$b}"General"{$r}""
+    echo $b"General"$r
     echo "  skill-issue on              turn notifications on"
     echo "  skill-issue off             turn them off, in every shell, until you turn them back on"
     echo "  skill-issue status          show the current settings"
+    echo "  skill-issue today           how many SKILL ISSUEs you got today"
     echo "  skill-issue test            send a test notification"
     echo "  skill-issue help            show this help"
     echo
-    echo {$b}"Sound"{$r}"  (default: none)"
+    echo $b"Sound"$r"  (default: none)"
     echo "  skill-issue sound FILE      play FILE with every SKILL ISSUE (wav, ogg, mp3, flac, opus...)"
     echo "  skill-issue sound system    play your system's error sound"
     echo "  skill-issue sound off       no sound"
     echo "  skill-issue sound           show the current sound"
     echo
-    echo {$b}"Icon"{$r}"  (default: the red error icon)"
+    echo $b"Icon"$r"  (default: the red error icon)"
     echo "  skill-issue icon FILE       show a picture of yours (png, jpg, svg, webp...)"
     echo "  skill-issue icon NAME       show an icon from your icon theme, like face-sad"
     echo "  skill-issue icon none       no icon"
     echo "  skill-issue icon default    back to the red error icon"
     echo "  skill-issue icon            show the current icon"
     echo
-    echo {$b}"Messages"{$r}"  (default: none, just SKILL ISSUE)"
+    echo $b"Messages"$r"  (default: none, just SKILL ISSUE)"
     echo "  skill-issue messages FILE   show a random line of FILE under SKILL ISSUE, one message per line"
     echo "  skill-issue messages off    back to just SKILL ISSUE"
     echo "  skill-issue messages        show the current file"
+end
+
+# "No SKILL ISSUE today", "1 SKILL ISSUE today", "7 SKILL ISSUEs today"
+function __skill_issue_today_text
+    set -l n (__skill_issue_today)
+    switch $n
+        case 0
+            echo "No SKILL ISSUE today. Suspicious."
+        case 1
+            echo "1 SKILL ISSUE today."
+        case '*'
+            echo "$n SKILL ISSUEs today."
+    end
 end
 
 function __skill_issue_status
@@ -534,6 +595,7 @@ function __skill_issue_status
     else
         echo "skill-issue is on. Turn it off with: skill-issue off"
     end
+    echo "Today: "(__skill_issue_today_text)
     __skill_issue_sound_status
     __skill_issue_icon_status
     __skill_issue_messages_status
@@ -562,6 +624,11 @@ function skill-issue -d "Turn SKILL ISSUE on or off, pick a sound, icon or messa
             __skill_issue_help | sed '1,2d'
         case status
             __skill_issue_status
+        case today
+            __skill_issue_today_text
+            if test -e $off
+                echo "skill-issue is off right now, so nothing is being counted."
+            end
         case sound
             __skill_issue_sound $argv[2]
         case icon
@@ -595,5 +662,5 @@ end
 
 function __skill_issue_fisher_uninstall --on-event skill-issue_uninstall
     functions -e (functions -a | string match -- '__skill_issue*') skill-issue
-    set -e skill_issue_ignore
+    set -e skill_issue_ignore __skill_issue_last_cmd __skill_issue_last_time __skill_issue_player
 end
