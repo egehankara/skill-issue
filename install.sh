@@ -1,6 +1,7 @@
 #!/usr/bin/env sh
 # Installs the skill-issue hook for fish
 set -e
+command -v fish >/dev/null || { echo "fish not found"; exit 1; }
 command -v notify-send >/dev/null || { echo "notify-send not found (install libnotify)"; exit 1; }
 dir="$(cd "$(dirname "$0")" && pwd)"
 mkdir -p "$HOME/.config/fish/conf.d"
