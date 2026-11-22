@@ -4,7 +4,43 @@ Every time a command fails in your terminal, your computer tells you the truth:
 
 > **SKILL ISSUE**
 
-That's it. A desktop notification, nothing else.
+That's it. A desktop notification, nothing else. Works in fish, bash and zsh.
+
+## Install
+
+### fish, with [Fisher](https://github.com/jorgebucaran/fisher)
+
+```fish
+fisher install egehankara/skill-issue
+```
+
+### fish, bash or zsh, with the installer
+
+```sh
+git clone https://github.com/egehankara/skill-issue ~/.local/share/skill-issue
+~/.local/share/skill-issue/install.sh
+```
+
+This installs it for your login shell. To pick shells yourself: `./install.sh fish bash zsh`.
+
+For bash and zsh, the installer adds one line to the end of `~/.bashrc` or `~/.zshrc`. If you'd rather do it yourself, add this line **at the end** of the file, after prompt tools like starship or oh-my-zsh:
+
+```sh
+source ~/.local/share/skill-issue/skill-issue.sh
+```
+
+The installer sends a test notification. If it can't, it tells you what's missing. Then open a new terminal and try `ls does-not-exist`.
+
+## Turning it off
+
+```sh
+skill-issue off      # no more notifications, in every shell, until you turn it back on
+skill-issue on
+skill-issue status
+skill-issue test     # send a test notification
+```
+
+Handy when you're sharing your screen.
 
 ## When you get a SKILL ISSUE
 
@@ -28,40 +64,54 @@ Some commands "fail" on purpose. These don't count:
 | Situation | Example |
 |---|---|
 | Search found nothing | `grep`, `rg`, `pgrep` with no matches |
-| A check returned false | `test -f x`, `[ -d dir ]`, `diff a b` |
+| A check returned false | `test -f x`, `[ -d dir ]`, `[[ -n $x ]]`, `diff a b` |
 | You stopped it yourself | Ctrl+C |
 | Pipe closed early | `yes \| head -1` |
 | Leaving the shell | `exit` after a failed command |
-| You handle errors yourself | `test -f x; and echo hi`, `cmd \|\| echo failed` (only crashes and missing commands count here) |
+| You handle errors yourself | `test -f x && echo hi`, `cmd \|\| echo failed` (only crashes and missing commands count here) |
+| You just pressed Enter | an empty line |
 
-To add your own quiet commands, put this in `~/.config/fish/config.fish`:
+To add your own quiet commands:
 
 ```fish
+# fish: in ~/.config/fish/config.fish
 set -g skill_issue_ignore $skill_issue_ignore mycommand
 ```
 
-## Install
-
-Requirements: [fish](https://fishshell.com) and `notify-send` (libnotify). Linux only for now.
-
 ```sh
-git clone https://github.com/egehankara/skill-issue
-cd skill-issue
-./install.sh
+# bash / zsh: in ~/.bashrc or ~/.zshrc, before the source line
+SKILL_ISSUE_IGNORE="grep rg diff test [ [[ false mycommand"
 ```
 
-Open a new terminal and try `ls does-not-exist`.
+## Requirements
+
+- **Linux.** macOS and Windows/WSL aren't supported yet.
+- **fish, bash 4.4+ or zsh.** Any terminal works (Kitty, Alacritty, Ghostty, Konsole, GNOME Terminal, VS Code, tmux...).
+- **notify-send**: package `libnotify` on Arch and Fedora, `libnotify-bin` on Debian and Ubuntu. Usually already installed.
+- **A notification daemon.** GNOME, KDE Plasma, XFCE, Cinnamon, MATE and most other desktops have one built in. On a tiling window manager (Hyprland, Sway, i3, bspwm...) you need to install one, for example `mako`, `dunst` or `swaync`.
+
+Over SSH or in a TTY there's no screen to show the notification on, so it stays quiet. Same if notify-send or the daemon is missing: no error spam in your terminal.
+
+Flatpak terminals and distrobox/toolbox containers need notify-send available inside the sandbox or container.
+
+**bash only:** bash reads the command from your history. A command you start with a space (with `HISTCONTROL=ignorespace`, the Ubuntu default) isn't saved there, so it can be judged as the command before it.
 
 ## Uninstall
 
+```fish
+fisher remove egehankara/skill-issue    # if you used Fisher
+```
+
 ```sh
-rm ~/.config/fish/conf.d/skill-issue.fish
+~/.local/share/skill-issue/uninstall.sh  # if you used the installer
 ```
 
 ## Tests
 
 ```sh
 fish tests/run.fish
+bash tests/run.sh
+zsh tests/run.sh
 ```
 
 ## License

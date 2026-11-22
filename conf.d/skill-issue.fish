@@ -1,4 +1,5 @@
 # skill-issue: a "SKILL ISSUE" notification every time a command fails.
+# https://github.com/egehankara/skill-issue
 #
 # Settings (set them in config.fish or with `set -U`):
 #   skill_issue_ignore   commands whose failures are normal (grep finding nothing, etc.)
@@ -10,6 +11,13 @@ or set -g skill_issue_ignore grep egrep fgrep zgrep rg ag ack diff cmp test [ fa
 
 set -g __skill_issue_last_cmd ""
 set -g __skill_issue_last_time 0
+
+# Shared with the bash/zsh version, so `skill-issue off` works in every shell
+function __skill_issue_off_file
+    set -l dir $XDG_STATE_HOME
+    test -n "$dir"; or set dir ~/.local/state
+    echo $dir/skill-issue/off
+end
 
 function __skill_issue_on_postexec --on-event fish_postexec
     # Both must be read on the same line, before anything else changes them
@@ -41,7 +49,12 @@ function __skill_issue_notify
         echo "SKILL ISSUE"
         return
     end
-    notify-send -a Terminal -i dialog-error "SKILL ISSUE" &
+    test -e (__skill_issue_off_file); and return
+    # No screen to show it on (SSH, TTY)
+    set -q DISPLAY; or set -q WAYLAND_DISPLAY; or return
+    # Missing notify-send or notification daemon: stay quiet instead of printing errors
+    command -q notify-send; or return
+    notify-send -a Terminal -i dialog-error "SKILL ISSUE" 2>/dev/null &
     disown
 end
 
@@ -93,4 +106,53 @@ function __skill_issue_handle -a cmdline
         __skill_issue_notify
     end
     set -g __skill_issue_last_cmd ""
+end
+
+function skill-issue -d "Turn SKILL ISSUE notifications on or off"
+    set -l off (__skill_issue_off_file)
+    switch "$argv[1]"
+        case off
+            mkdir -p (path dirname $off); and touch $off
+            echo "skill-issue is off. No more truth, in any shell."
+        case on
+            rm -f $off
+            echo "skill-issue is on."
+        case status ''
+            if test -e $off
+                echo "skill-issue is off. Turn it on with: skill-issue on"
+            else
+                echo "skill-issue is on. Turn it off with: skill-issue off"
+            end
+        case test
+            if test -e $off
+                echo "skill-issue is off, so nothing will show up. Turn it on with: skill-issue on"
+                return 1
+            end
+            if notify-send -a Terminal -i dialog-error "SKILL ISSUE" 2>/dev/null
+                echo "Sent a test notification."
+            else
+                echo "Couldn't show a notification. Is a notification daemon running?"
+                return 1
+            end
+        case help -h --help
+            echo "Usage: skill-issue [on | off | status | test]"
+            echo
+            echo "  on       turn notifications on"
+            echo "  off      turn them off (in every shell, until you turn them back on)"
+            echo "  status   show whether it's on (default)"
+            echo "  test     send a test notification"
+        case '*'
+            echo "skill-issue: unknown command '$argv[1]'. Try: skill-issue help" >&2
+            return 1
+    end
+end
+
+# Fisher install hooks
+function __skill_issue_fisher_install --on-event skill-issue_install
+    skill-issue test >/dev/null
+end
+
+function __skill_issue_fisher_uninstall --on-event skill-issue_uninstall
+    functions -e (functions -a | string match -- '__skill_issue*') skill-issue
+    set -e skill_issue_ignore
 end

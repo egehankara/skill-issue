@@ -1,6 +1,6 @@
 # Run: fish tests/run.fish
 set -gx SKILL_ISSUE_DRY 1
-source (status dirname)/../skill-issue.fish
+source (status dirname)/../conf.d/skill-issue.fish
 set -g fails 0
 
 # yes/no DESCRIPTION CMDLINE CODES...

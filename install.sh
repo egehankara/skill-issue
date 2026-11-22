@@ -1,9 +1,65 @@
 #!/usr/bin/env sh
-# Installs the skill-issue hook for fish
+# Installs skill-issue.
+#   ./install.sh                 for your login shell
+#   ./install.sh fish bash zsh   for the shells you name
 set -e
-command -v fish >/dev/null || { echo "fish not found"; exit 1; }
-command -v notify-send >/dev/null || { echo "notify-send not found (install libnotify)"; exit 1; }
+
 dir="$(cd "$(dirname "$0")" && pwd)"
-mkdir -p "$HOME/.config/fish/conf.d"
-ln -sf "$dir/skill-issue.fish" "$HOME/.config/fish/conf.d/skill-issue.fish"
-echo "Installed. Open a new fish shell and run a failing command to test."
+shells="$*"
+[ -n "$shells" ] || shells="$(basename "${SHELL:-}")"
+
+command -v notify-send >/dev/null || {
+    echo "notify-send not found. Install it first:"
+    echo "  Arch / Fedora:   libnotify"
+    echo "  Debian / Ubuntu: libnotify-bin"
+    exit 1
+}
+
+# Adds the source line to an rc file, once
+add_source() {
+    rc="$1"
+    line="source \"$dir/skill-issue.sh\" # skill-issue"
+    touch "$rc"
+    if grep -qF "# skill-issue" "$rc"; then
+        echo "$2: already in $rc"
+    else
+        printf '\n%s\n' "$line" >>"$rc"
+        echo "$2: added to the end of $rc"
+    fi
+}
+
+for shell in $shells; do
+    case "$shell" in
+        fish)
+            command -v fish >/dev/null || { echo "fish not found"; exit 1; }
+            conf="${XDG_CONFIG_HOME:-$HOME/.config}/fish"
+            mkdir -p "$conf/conf.d" "$conf/completions"
+            ln -sf "$dir/conf.d/skill-issue.fish" "$conf/conf.d/skill-issue.fish"
+            ln -sf "$dir/completions/skill-issue.fish" "$conf/completions/skill-issue.fish"
+            echo "fish: installed into $conf"
+            ;;
+        bash)
+            add_source "$HOME/.bashrc" bash
+            ;;
+        zsh)
+            add_source "${ZDOTDIR:-$HOME}/.zshrc" zsh
+            ;;
+        *)
+            echo "Unsupported shell: '$shell'. Supported: fish, bash, zsh"
+            echo "Pick one: ./install.sh fish"
+            exit 1
+            ;;
+    esac
+done
+
+# Send a test notification to make sure they can actually show up
+if notify-send -a Terminal -i dialog-error "SKILL ISSUE" "skill-issue is installed" 2>/dev/null; then
+    echo
+    echo "You should see a test notification now."
+    echo "Open a new terminal and run a failing command, like: ls does-not-exist"
+else
+    echo
+    echo "Warning: couldn't show a notification. No notification daemon is running."
+    echo "GNOME, KDE, XFCE and most desktops have one built in. On a tiling window"
+    echo "manager (Hyprland, Sway, i3...) install one, for example mako, dunst or swaync."
+fi
