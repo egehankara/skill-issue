@@ -132,7 +132,8 @@ for r in (seq 0 7)
     test (count (printf '%s\n' $round | sort -u)) -eq 5; or set bad 1
 end
 for i in (seq 2 40)
-    test "$seen[$i]" = "$seen[(math $i - 1)]"; and set bad 1
+    set -l prev (math $i - 1)
+    test "$seen[$i]" = "$seen[$prev]"; and set bad 1
 end
 if test $bad -eq 0
     echo "ok    shuffle bag: 8 rounds, all 5 each round, no repeats in a row"
